@@ -1,0 +1,356 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/fastshare
+          cat > settings.gradle <<'EOF1'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'FastShare'
+          include ':app'
+          EOF1
+          cat > build.gradle <<'EOF2'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF2
+          cat > gradle.properties <<'EOF3'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          EOF3
+          cat > app/build.gradle <<'EOF4'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.fastshare'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.fastshare'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          dependencies {
+              implementation 'com.google.android.gms:play-services-nearby:19.1.0'
+          }
+          EOF4
+          cat > app/src/main/AndroidManifest.xml <<'EOF5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+              <application
+                  android:label="نقل سريع"
+                  android:supportsRtl="true"
+                  android:requestLegacyExternalStorage="true">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF5
+          cat > app/src/main/java/com/fastshare/MainActivity.kt <<'EOF6'
+          package com.fastshare
+
+          import android.app.Activity
+          import android.content.ContentValues
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.provider.OpenableColumns
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.TextView
+          import android.widget.Toast
+          import com.google.android.gms.nearby.Nearby
+          import com.google.android.gms.nearby.connection.*
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.io.OutputStream
+
+          class MainActivity : Activity() {
+              private val svc = "com.fastshare.svc"
+              private val strat = Strategy.P2P_POINT_TO_POINT
+              private lateinit var client: ConnectionsClient
+              private lateinit var status: TextView
+              private lateinit var speed: TextView
+              private lateinit var bar: ProgressBar
+              private var picked: List<Uri> = emptyList()
+              private var sending = false
+              private var pending: (() -> Unit)? = null
+              private var t0 = 0L
+              private val prog = HashMap<Long, Long>()
+              private val names = HashMap<Long, String>()
+              private val files = HashMap<Long, Payload>()
+              private val done = HashSet<Long>()
+              private val sentIds = HashSet<Long>()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  client = Nearby.getConnectionsClient(this)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.gravity = Gravity.CENTER
+                  root.setPadding(48, 48, 48, 48)
+                  val title = TextView(this)
+                  title.text = "نقل سريع"
+                  title.textSize = 30f
+                  title.gravity = Gravity.CENTER
+                  val bSend = Button(this)
+                  bSend.text = "إرسال ملفات"
+                  val bRecv = Button(this)
+                  bRecv.text = "استقبال ملفات"
+                  status = TextView(this)
+                  status.text = "اختر: إرسال أو استقبال (على الجهازين)"
+                  status.gravity = Gravity.CENTER
+                  status.textSize = 18f
+                  bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  speed = TextView(this)
+                  speed.gravity = Gravity.CENTER
+                  speed.textSize = 22f
+                  for (v in listOf(title, bSend, bRecv, status, bar, speed)) root.addView(v)
+                  setContentView(root)
+                  bSend.setOnClickListener {
+                      withPerms {
+                          val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                          i.addCategory(Intent.CATEGORY_OPENABLE)
+                          i.type = "*/*"
+                          i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                          startActivityForResult(i, 1)
+                      }
+                  }
+                  bRecv.setOnClickListener { withPerms { startReceive() } }
+              }
+
+              private fun perms(): Array<String> {
+                  val l = mutableListOf<String>()
+                  if (Build.VERSION.SDK_INT <= 32) l.add("android.permission.ACCESS_FINE_LOCATION")
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      l.add("android.permission.BLUETOOTH_ADVERTISE")
+                      l.add("android.permission.BLUETOOTH_CONNECT")
+                      l.add("android.permission.BLUETOOTH_SCAN")
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) l.add("android.permission.NEARBY_WIFI_DEVICES")
+                  if (Build.VERSION.SDK_INT <= 28) l.add("android.permission.WRITE_EXTERNAL_STORAGE")
+                  return l.toTypedArray()
+              }
+
+              private fun withPerms(a: () -> Unit) {
+                  pending = a
+                  requestPermissions(perms(), 7)
+              }
+
+              override fun onRequestPermissionsResult(c: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(c, p, r)
+                  if (c == 7) {
+                      val a = pending
+                      pending = null
+                      a?.invoke()
+                  }
+              }
+
+              override fun onActivityResult(rc: Int, res: Int, d: Intent?) {
+                  super.onActivityResult(rc, res, d)
+                  if (rc != 1 || res != RESULT_OK || d == null) return
+                  val l = ArrayList<Uri>()
+                  val cd = d.clipData
+                  if (cd != null) {
+                      for (i in 0 until cd.itemCount) l.add(cd.getItemAt(i).uri)
+                  } else if (d.data != null) {
+                      l.add(d.data!!)
+                  }
+                  picked = l
+                  startSend()
+              }
+
+              private fun st(s: String) { status.text = s }
+
+              private fun startReceive() {
+                  sending = false
+                  reset()
+                  client.startAdvertising(Build.MODEL, svc, conn,
+                      AdvertisingOptions.Builder().setStrategy(strat).build())
+                      .addOnSuccessListener { st("بانتظار الجهاز المرسل...") }
+                      .addOnFailureListener { st("خطأ: " + it.message) }
+              }
+
+              private fun startSend() {
+                  sending = true
+                  reset()
+                  client.startDiscovery(svc, disc,
+                      DiscoveryOptions.Builder().setStrategy(strat).build())
+                      .addOnSuccessListener { st("جاري البحث عن الجهاز المستقبل...") }
+                      .addOnFailureListener { st("خطأ: " + it.message) }
+              }
+
+              private fun reset() {
+                  t0 = 0L
+                  prog.clear()
+                  names.clear()
+                  files.clear()
+                  done.clear()
+                  sentIds.clear()
+                  bar.progress = 0
+                  speed.text = ""
+              }
+
+              private val disc = object : EndpointDiscoveryCallback() {
+                  override fun onEndpointFound(id: String, i: DiscoveredEndpointInfo) {
+                      client.requestConnection(Build.MODEL, id, conn)
+                  }
+                  override fun onEndpointLost(id: String) {}
+              }
+
+              private val conn = object : ConnectionLifecycleCallback() {
+                  override fun onConnectionInitiated(id: String, i: ConnectionInfo) {
+                      client.acceptConnection(id, pcb)
+                  }
+                  override fun onConnectionResult(id: String, r: ConnectionResolution) {
+                      if (r.status.isSuccess) {
+                          client.stopDiscovery()
+                          client.stopAdvertising()
+                          st("تم الاتصال")
+                          if (sending) sendAll(id)
+                      } else {
+                          st("فشل الاتصال")
+                      }
+                  }
+                  override fun onDisconnected(id: String) { st("انقطع الاتصال") }
+              }
+
+              private fun nameOf(u: Uri): String {
+                  contentResolver.query(u, null, null, null, null)?.use { c ->
+                      if (c.moveToFirst()) {
+                          val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                          if (i >= 0) return c.getString(i)
+                      }
+                  }
+                  return "file_" + System.currentTimeMillis()
+              }
+
+              private fun sendAll(ep: String) {
+                  for (u in picked) {
+                      val pfd = contentResolver.openFileDescriptor(u, "r") ?: continue
+                      val fp = Payload.fromFile(pfd)
+                      sentIds.add(fp.id)
+                      val meta = fp.id.toString() + "|" + nameOf(u)
+                      client.sendPayload(ep, Payload.fromBytes(meta.toByteArray()))
+                      client.sendPayload(ep, fp)
+                  }
+                  st("جاري الإرسال...")
+              }
+
+              private val pcb = object : PayloadCallback() {
+                  override fun onPayloadReceived(id: String, p: Payload) {
+                      if (p.type == Payload.Type.BYTES) {
+                          val s = String(p.asBytes()!!)
+                          val k = s.indexOf('|')
+                          val pid = s.substring(0, k).toLong()
+                          names[pid] = s.substring(k + 1)
+                          trySave(pid)
+                      } else if (p.type == Payload.Type.FILE) {
+                          files[p.id] = p
+                      }
+                  }
+
+                  override fun onPayloadTransferUpdate(id: String, u: PayloadTransferUpdate) {
+                      if (t0 == 0L) t0 = System.currentTimeMillis()
+                      prog[u.payloadId] = u.bytesTransferred
+                      if (u.totalBytes > 0) bar.progress = (u.bytesTransferred * 100 / u.totalBytes).toInt()
+                      val sec = (System.currentTimeMillis() - t0) / 1000.0 + 0.001
+                      val mb = prog.values.sum() / 1048576.0
+                      speed.text = String.format("%.1f MB/s", mb / sec)
+                      if (u.status == PayloadTransferUpdate.Status.SUCCESS) {
+                          if (sentIds.remove(u.payloadId) && sentIds.isEmpty()) st("تم الإرسال بنجاح ✓")
+                          if (files.containsKey(u.payloadId)) {
+                              done.add(u.payloadId)
+                              trySave(u.payloadId)
+                          }
+                      } else if (u.status == PayloadTransferUpdate.Status.FAILURE) {
+                          st("فشل النقل")
+                      }
+                  }
+              }
+
+              private fun trySave(pid: Long) {
+                  if (!done.contains(pid) || !names.containsKey(pid) || !files.containsKey(pid)) return
+                  val p = files[pid]!!
+                  val name = names[pid]!!
+                  st("جاري حفظ: " + name)
+                  Thread {
+                      try {
+                          val src = contentResolver.openInputStream(p.asFile()!!.asUri()!!)!!
+                          val out: OutputStream
+                          if (Build.VERSION.SDK_INT >= 29) {
+                              val cv = ContentValues()
+                              cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                              cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/FastShare")
+                              val u = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)!!
+                              out = contentResolver.openOutputStream(u)!!
+                          } else {
+                              val d = File(Environment.getExternalStoragePublicDirectory(
+                                  Environment.DIRECTORY_DOWNLOADS), "FastShare")
+                              d.mkdirs()
+                              out = FileOutputStream(File(d, name))
+                          }
+                          src.use { i -> out.use { o -> i.copyTo(o, 1 shl 20) } }
+                          runOnUiThread { st("تم الحفظ في: Download/FastShare ✓") }
+                      } catch (e: Exception) {
+                          runOnUiThread { Toast.makeText(this, "خطأ حفظ: " + e.message, Toast.LENGTH_LONG).show() }
+                      }
+                  }.start()
+              }
+          }
+          EOF6
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FastShare-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
