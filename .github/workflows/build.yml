@@ -48,8 +48,8 @@ jobs:
                   applicationId 'com.fastshare'
                   minSdk 24
                   targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '1.1'
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -78,6 +78,7 @@ jobs:
               <application
                   android:label="نقل سريع"
                   android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
                   android:requestLegacyExternalStorage="true">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
@@ -94,6 +95,11 @@ jobs:
           import android.app.Activity
           import android.content.ContentValues
           import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.content.res.Configuration
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -101,10 +107,11 @@ jobs:
           import android.provider.MediaStore
           import android.provider.OpenableColumns
           import android.view.Gravity
+          import android.view.View
           import android.view.WindowManager
-          import android.widget.Button
           import android.widget.LinearLayout
           import android.widget.ProgressBar
+          import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
           import com.google.android.gms.nearby.Nearby
@@ -116,10 +123,15 @@ jobs:
           class MainActivity : Activity() {
               private val svc = "com.fastshare.svc"
               private val strat = Strategy.P2P_POINT_TO_POINT
+              private val MATCH = LinearLayout.LayoutParams.MATCH_PARENT
+              private val WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
               private lateinit var client: ConnectionsClient
               private lateinit var status: TextView
               private lateinit var speed: TextView
               private lateinit var bar: ProgressBar
+              private var statusText = "اختر: إرسال أو استقبال (على الجهازين)"
+              private var speedText = ""
+              private var progressVal = 0
               private var picked: List<Uri> = emptyList()
               private var sending = false
               private var pending: (() -> Unit)? = null
@@ -129,43 +141,177 @@ jobs:
               private val files = HashMap<Long, Payload>()
               private val done = HashSet<Long>()
               private val sentIds = HashSet<Long>()
+              private val accents = intArrayOf(
+                  0xFF1FA971.toInt(), 0xFF2F80ED.toInt(), 0xFF8E5CF7.toInt(), 0xFFF2994A.toInt())
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                   client = Nearby.getConnectionsClient(this)
+                  buildUi()
+              }
+
+              private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
+
+              private fun prefs() = getSharedPreferences("s", 0)
+
+              private fun accent(): Int = accents[prefs().getInt("acc", 0)]
+
+              private fun isDark(): Boolean {
+                  val v = prefs().getInt("dark", -1)
+                  if (v >= 0) return v == 1
+                  val m = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+                  return m == Configuration.UI_MODE_NIGHT_YES
+              }
+
+              private fun shade(c: Int): Int {
+                  val h = FloatArray(3)
+                  Color.colorToHSV(c, h)
+                  h[2] = h[2] * 0.7f
+                  return Color.HSVToColor(h)
+              }
+
+              private fun bg(c: Int, r: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(c)
+                  g.cornerRadius = dp(r).toFloat()
+                  return g
+              }
+
+              private fun tv(t: String, size: Float, color: Int, bold: Boolean): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = size
+                  v.setTextColor(color)
+                  if (bold) v.setTypeface(null, Typeface.BOLD)
+                  return v
+              }
+
+              private fun lp(w: Int, h: Int, top: Int): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(w, h)
+                  p.topMargin = dp(top)
+                  return p
+              }
+
+              private fun action(e: String, t: String, s: String, filled: Boolean,
+                                 cardC: Int, txt: Int, sub: Int, onClick: () -> Unit): LinearLayout {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.setPadding(dp(22), dp(22), dp(22), dp(22))
+                  val ac = accent()
+                  if (filled) {
+                      val g = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(ac, shade(ac)))
+                      g.cornerRadius = dp(24).toFloat()
+                      c.background = g
+                      c.elevation = dp(6).toFloat()
+                  } else {
+                      val g = bg(cardC, 24)
+                      g.setStroke(dp(2), ac)
+                      c.background = g
+                  }
+                  val tc = if (filled) Color.WHITE else txt
+                  val sc = if (filled) 0xCCFFFFFF.toInt() else sub
+                  c.addView(tv(e, 36f, tc, false))
+                  c.addView(tv(t, 22f, tc, true))
+                  c.addView(tv(s, 13f, sc, false))
+                  c.isClickable = true
+                  c.setOnClickListener { onClick() }
+                  return c
+              }
+
+              private fun buildUi() {
+                  val dark = isDark()
+                  val bgC = if (dark) 0xFF0F1419.toInt() else 0xFFF3F6FA.toInt()
+                  val cardC = if (dark) 0xFF1A222C.toInt() else Color.WHITE
+                  val txt = if (dark) 0xFFEAF0F6.toInt() else 0xFF14202B.toInt()
+                  val sub = if (dark) 0xFF8FA1B3.toInt() else 0xFF5B6B7B.toInt()
+                  val ac = accent()
+                  window.statusBarColor = bgC
+                  window.navigationBarColor = bgC
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      var f = window.decorView.systemUiVisibility
+                      f = if (dark) f and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+                          else f or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                      window.decorView.systemUiVisibility = f
+                  }
+                  val sv = ScrollView(this)
+                  sv.setBackgroundColor(bgC)
+                  sv.layoutDirection = View.LAYOUT_DIRECTION_RTL
                   val root = LinearLayout(this)
                   root.orientation = LinearLayout.VERTICAL
-                  root.gravity = Gravity.CENTER
-                  root.setPadding(48, 48, 48, 48)
-                  val title = TextView(this)
-                  title.text = "نقل سريع"
-                  title.textSize = 30f
-                  title.gravity = Gravity.CENTER
-                  val bSend = Button(this)
-                  bSend.text = "إرسال ملفات"
-                  val bRecv = Button(this)
-                  bRecv.text = "استقبال ملفات"
-                  status = TextView(this)
-                  status.text = "اختر: إرسال أو استقبال (على الجهازين)"
-                  status.gravity = Gravity.CENTER
-                  status.textSize = 18f
-                  bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-                  speed = TextView(this)
-                  speed.gravity = Gravity.CENTER
-                  speed.textSize = 22f
-                  for (v in listOf(title, bSend, bRecv, status, bar, speed)) root.addView(v)
-                  setContentView(root)
-                  bSend.setOnClickListener {
-                      withPerms {
-                          val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
-                          i.addCategory(Intent.CATEGORY_OPENABLE)
-                          i.type = "*/*"
-                          i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                          startActivityForResult(i, 1)
-                      }
+                  root.setPadding(dp(20), dp(28), dp(20), dp(28))
+                  sv.addView(root)
+
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  val tb = LinearLayout(this)
+                  tb.orientation = LinearLayout.VERTICAL
+                  tb.addView(tv("نقل سريع", 30f, txt, true))
+                  tb.addView(tv("أرسل أي ملف بأقصى سرعة عبر Wi-Fi Direct", 13f, sub, false))
+                  head.addView(tb, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  val chip = tv(if (dark) "☀️ فاتح" else "🌙 داكن", 14f, txt, true)
+                  chip.setPadding(dp(14), dp(8), dp(14), dp(8))
+                  chip.background = bg(cardC, 20)
+                  chip.setOnClickListener {
+                      prefs().edit().putInt("dark", if (dark) 0 else 1).apply()
+                      buildUi()
                   }
-                  bRecv.setOnClickListener { withPerms { startReceive() } }
+                  head.addView(chip)
+                  root.addView(head)
+
+                  root.addView(action("📤", "إرسال ملفات", "اختر ملفات من جوالك وأرسلها للجهاز الآخر",
+                      true, cardC, txt, sub) { withPerms { pickFiles() } }, lp(MATCH, WRAP, 28))
+                  root.addView(action("📥", "استقبال ملفات", "اجعل جوالك جاهزاً لاستقبال الملفات",
+                      false, cardC, txt, sub) { withPerms { startReceive() } }, lp(MATCH, WRAP, 16))
+
+                  val sc = LinearLayout(this)
+                  sc.orientation = LinearLayout.VERTICAL
+                  sc.setPadding(dp(20), dp(20), dp(20), dp(20))
+                  sc.background = bg(cardC, 24)
+                  status = tv(statusText, 16f, txt, false)
+                  bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  bar.max = 100
+                  bar.progress = progressVal
+                  bar.progressTintList = ColorStateList.valueOf(ac)
+                  bar.progressBackgroundTintList = ColorStateList.valueOf(
+                      if (dark) 0xFF2B3744.toInt() else 0xFFDDE5EE.toInt())
+                  speed = tv(speedText, 30f, ac, true)
+                  sc.addView(tv("الحالة", 12f, sub, false))
+                  sc.addView(status, lp(MATCH, WRAP, 4))
+                  sc.addView(bar, lp(MATCH, dp(10), 14))
+                  sc.addView(speed, lp(MATCH, WRAP, 10))
+                  root.addView(sc, lp(MATCH, WRAP, 16))
+
+                  root.addView(tv("لون التطبيق", 12f, sub, false), lp(WRAP, WRAP, 24))
+                  val dots = LinearLayout(this)
+                  dots.orientation = LinearLayout.HORIZONTAL
+                  val sel = prefs().getInt("acc", 0)
+                  for (i in accents.indices) {
+                      val d = View(this)
+                      val g = GradientDrawable()
+                      g.shape = GradientDrawable.OVAL
+                      g.setColor(accents[i])
+                      if (i == sel) g.setStroke(dp(3), txt)
+                      d.background = g
+                      d.setOnClickListener {
+                          prefs().edit().putInt("acc", i).apply()
+                          buildUi()
+                      }
+                      val p = LinearLayout.LayoutParams(dp(38), dp(38))
+                      p.marginEnd = dp(12)
+                      dots.addView(d, p)
+                  }
+                  root.addView(dots, lp(WRAP, WRAP, 10))
+                  setContentView(sv)
+              }
+
+              private fun pickFiles() {
+                  val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                  i.addCategory(Intent.CATEGORY_OPENABLE)
+                  i.type = "*/*"
+                  i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                  startActivityForResult(i, 1)
               }
 
               private fun perms(): Array<String> {
@@ -209,7 +355,10 @@ jobs:
                   startSend()
               }
 
-              private fun st(s: String) { status.text = s }
+              private fun st(s: String) {
+                  statusText = s
+                  status.text = s
+              }
 
               private fun startReceive() {
                   sending = false
@@ -236,6 +385,8 @@ jobs:
                   files.clear()
                   done.clear()
                   sentIds.clear()
+                  progressVal = 0
+                  speedText = ""
                   bar.progress = 0
                   speed.text = ""
               }
@@ -255,7 +406,7 @@ jobs:
                       if (r.status.isSuccess) {
                           client.stopDiscovery()
                           client.stopAdvertising()
-                          st("تم الاتصال")
+                          st("تم الاتصال ✓")
                           if (sending) sendAll(id)
                       } else {
                           st("فشل الاتصال")
@@ -302,10 +453,14 @@ jobs:
                   override fun onPayloadTransferUpdate(id: String, u: PayloadTransferUpdate) {
                       if (t0 == 0L) t0 = System.currentTimeMillis()
                       prog[u.payloadId] = u.bytesTransferred
-                      if (u.totalBytes > 0) bar.progress = (u.bytesTransferred * 100 / u.totalBytes).toInt()
+                      if (u.totalBytes > 0) {
+                          progressVal = (u.bytesTransferred * 100 / u.totalBytes).toInt()
+                          bar.progress = progressVal
+                      }
                       val sec = (System.currentTimeMillis() - t0) / 1000.0 + 0.001
                       val mb = prog.values.sum() / 1048576.0
-                      speed.text = String.format("%.1f MB/s", mb / sec)
+                      speedText = String.format("%.1f MB/s", mb / sec)
+                      speed.text = speedText
                       if (u.status == PayloadTransferUpdate.Status.SUCCESS) {
                           if (sentIds.remove(u.payloadId) && sentIds.isEmpty()) st("تم الإرسال بنجاح ✓")
                           if (files.containsKey(u.payloadId)) {
